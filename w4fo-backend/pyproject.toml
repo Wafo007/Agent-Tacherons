@@ -1,0 +1,16 @@
+[project]
+name = "w4fo-backend"
+version = "0.1.0"
+description = "Backend de l'assistant IA personnel W4FO"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- INTERNET est déjà déclaré dans le manifest principal, mais le template
+         Flutter standard le redéclare ici pour les builds debug/profile (hot reload). -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+</manifest>
