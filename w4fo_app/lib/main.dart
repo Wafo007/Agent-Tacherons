@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/date_symbol_data_local.dart';
 
+import 'application/providers/auth_provider.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 
@@ -21,11 +22,43 @@ Future<void> main() async {
   runApp(const ProviderScope(child: W4FOApp()));
 }
 
-class W4FOApp extends ConsumerWidget {
+class W4FOApp extends ConsumerStatefulWidget {
   const W4FOApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<W4FOApp> createState() => _W4FOAppState();
+}
+
+/// `WidgetsBindingObserver` : détecte le retour de l'application au premier
+/// plan (`AppLifecycleState.resumed`) pour revalider proactivement la session
+/// (voir `AuthNotifier.revalidateOnResume`) — couvre le scénario "mise en
+/// arrière-plan puis retour plusieurs heures plus tard" quand le processus de
+/// l'app a survécu (pas de redémarrage complet). Le cas où l'OS a totalement
+/// tué le processus est déjà couvert par la restauration au démarrage
+/// (`AuthNotifier._checkInitialAuthStatus`, appelée depuis `main()` via le
+/// constructeur de `AuthNotifier`), puisque `main()` est ré-exécuté.
+class _W4FOAppState extends ConsumerState<W4FOApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ref.read(authProvider.notifier).revalidateOnResume();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final router = ref.watch(routerProvider);
 
     return MaterialApp.router(

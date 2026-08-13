@@ -7,7 +7,7 @@ que l'on relie les interfaces du domaine à leurs implémentations concrètes
 SQLAlchemy ou les classes d'implémentation directement.
 """
 
-from typing import Annotated
+from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
@@ -43,7 +43,30 @@ from src.infrastructure.persistence.repositories.user_settings_repository_impl i
 from src.infrastructure.voice.stt_provider_impl import GoogleWebSpeechSTTProvider
 from src.infrastructure.voice.tts_provider_impl import EdgeTTSProvider
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+
+# --- IMPORTANT (correctif 403 vs 401) ---
+#
+# Par défaut, `OAuth2PasswordBearer` lève un HTTP 403 Forbidden (pas 401)
+# quand aucun header `Authorization` n'est présent dans la requête, ou que ce
+# header est malformé — c'est un comportement historique de FastAPI/Starlette
+# (`OAuth2PasswordBearer.__call__` -> `HTTPException(status_code=403,
+# detail="Not authenticated")` quand `auto_error=True`, ce qui est la valeur
+# par défaut).
+#
+# Ce 403 n'a rien à voir avec une autorisation refusée : il signifie
+# simplement "je n'ai reçu aucun token", ce qui arrive typiquement quand
+# `flutter_secure_storage` ne parvient plus à relire le token côté client
+# (ex. clé Android Keystore invalidée après un certain temps) ou qu'aucun
+# token n'a encore été attaché à la requête. Le frontend ne peut alors pas
+# distinguer "token expiré" (qui doit déclencher un refresh) de "accès
+# interdit" (qui ne doit surtout pas déclencher de refresh en boucle).
+#
+# On désactive donc l'auto-erreur du schéma OAuth2 (`auto_error=False`) et on
+# lève nous-mêmes un 401 uniforme dans `get_current_user_id` pour TOUT
+# problème d'authentification (token absent, malformé, invalide ou expiré).
+# Un vrai 403 est ainsi réservé aux cas d'autorisation authentique (utilisateur
+# authentifié mais non habilité), qu'aucun refresh ne peut résoudre.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
@@ -128,8 +151,23 @@ STTProviderDep = Annotated[STTProvider, Depends(get_stt_provider)]
 TTSProviderDep = Annotated[TTSProvider, Depends(get_tts_provider)]
 
 
-async def get_current_user_id(token: Annotated[str, Depends(oauth2_scheme)]) -> UUID:
-    """Extrait et valide l'utilisateur courant à partir du token JWT (access token)."""
+async def get_current_user_id(token: Annotated[Optional[str], Depends(oauth2_scheme)]) -> UUID:
+    """Extrait et valide l'utilisateur courant à partir du token JWT (access token).
+
+    Lève systématiquement un 401 (jamais 403) pour tout problème lié à
+    l'authentification elle-même : absence de token, token malformé, invalide
+    ou expiré. C'est ce statut que l'intercepteur Dio côté Flutter sait
+    interpréter comme "il faut tenter un refresh, puis rediriger vers le
+    login si le refresh échoue aussi". Voir le commentaire au-dessus de
+    `oauth2_scheme` pour le détail du problème que ceci corrige.
+    """
+    if token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Non authentifié : aucun token fourni.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         payload = decode_token(token)
     except ValueError as exc:

@@ -29,7 +29,7 @@ final apiClientProvider = Provider<ApiClient>((ref) => ApiClient());
 
 final authRepositoryProvider = Provider<AuthRepository>((ref) {
   final remote = AuthRemoteDataSource(ref.watch(apiClientProvider));
-  return AuthRepositoryImpl(remote, ref.watch(secureStorageProvider));
+  return AuthRepositoryImpl(remote, ref.watch(secureStorageProvider), ref.watch(apiClientProvider));
 });
 
 final taskRepositoryProvider = Provider<TaskRepository>((ref) {

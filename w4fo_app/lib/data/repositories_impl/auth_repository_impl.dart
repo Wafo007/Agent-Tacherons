@@ -1,3 +1,4 @@
+import '../../core/network/api_client.dart';
 import '../../domain/entities/user.dart';
 import '../../domain/repositories/auth_repository.dart';
 import '../datasources/local/secure_storage.dart';
@@ -6,8 +7,9 @@ import '../datasources/remote/auth_remote_datasource.dart';
 class AuthRepositoryImpl implements AuthRepository {
   final AuthRemoteDataSource _remoteDataSource;
   final SecureStorage _secureStorage;
+  final ApiClient _apiClient;
 
-  const AuthRepositoryImpl(this._remoteDataSource, this._secureStorage);
+  const AuthRepositoryImpl(this._remoteDataSource, this._secureStorage, this._apiClient);
 
   @override
   Future<User> register({required String email, required String fullName, required String password}) {
@@ -28,4 +30,7 @@ class AuthRepositoryImpl implements AuthRepository {
 
   @override
   Future<bool> isLoggedIn() async => (await _secureStorage.getAccessToken()) != null;
+
+  @override
+  Future<bool> restoreSession() => _apiClient.restoreSession();
 }

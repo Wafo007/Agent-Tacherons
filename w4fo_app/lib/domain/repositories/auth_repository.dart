@@ -21,4 +21,11 @@ abstract class AuthRepository {
   Future<String?> getAccessToken();
 
   Future<bool> isLoggedIn();
+
+  /// Restaure la session au démarrage de l'application : valide l'access
+  /// token en cache localement (sans appel réseau si possible), le rafraîchit
+  /// via le refresh token si besoin, et ne renvoie `false` (session perdue)
+  /// que si le refresh token est explicitement invalide/expiré. Voir
+  /// `ApiClient.restoreSession` pour le détail du comportement.
+  Future<bool> restoreSession();
 }
