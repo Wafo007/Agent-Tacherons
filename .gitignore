@@ -40,8 +40,6 @@ venv/
 .mypy_cache/
 
 # Secrets
-.env
-.env.*
 !.env.example
 
 # IDE
