@@ -8,7 +8,7 @@ import '../../models/task_model.dart';
 class TaskRemoteDataSource {
   final Dio _dio;
 
-  const TaskRemoteDataSource(ApiClient apiClient) : _dio = apiClient.dio;
+  TaskRemoteDataSource(ApiClient apiClient) : _dio = apiClient.dio;
 
   Future<List<Task>> listTasks({TaskStatus? status, String? category}) async {
     final response = await _dio.get('/api/v1/tasks', queryParameters: {

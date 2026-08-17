@@ -65,7 +65,7 @@ class UserSettingsData {
 class SettingsRemoteDataSource {
   final Dio _dio;
 
-  const SettingsRemoteDataSource(ApiClient apiClient) : _dio = apiClient.dio;
+  SettingsRemoteDataSource(ApiClient apiClient) : _dio = apiClient.dio;
 
   Future<UserSettingsData> getSettings() async {
     final response = await _dio.get('/api/v1/settings');

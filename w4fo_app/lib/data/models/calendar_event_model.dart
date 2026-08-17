@@ -1,4 +1,5 @@
 import '../../domain/entities/calendar_event.dart';
+import '../../domain/repositories/calendar_repository.dart';
 
 class CalendarEventModel {
   static CalendarEvent fromJson(Map<String, dynamic> json) {

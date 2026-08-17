@@ -9,7 +9,7 @@ import '../../models/calendar_event_model.dart';
 class CalendarRemoteDataSource {
   final Dio _dio;
 
-  const CalendarRemoteDataSource(ApiClient apiClient) : _dio = apiClient.dio;
+  CalendarRemoteDataSource(ApiClient apiClient) : _dio = apiClient.dio;
 
   Future<List<CalendarEvent>> listEvents({DateTime? startRange, DateTime? endRange}) async {
     final response = await _dio.get('/api/v1/calendar', queryParameters: {

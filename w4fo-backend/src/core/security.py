@@ -9,23 +9,44 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from src.core.config import get_settings
 
 settings = get_settings()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# --- Hashing des mots de passe ---
+#
+# On utilise directement le package `bcrypt` plutôt que `passlib` :
+# passlib 1.7.4 (dernière version publiée, non maintenue depuis 2020) est
+# incompatible avec les versions récentes de `bcrypt` (>=4.1), qui ont retiré
+# l'attribut `__about__` que passlib essaie de lire pour détecter la version
+# du backend. Résultat : `AttributeError: module 'bcrypt' has no attribute
+# '__about__'`, suivi d'un `ValueError: password cannot be longer than 72
+# bytes` car passlib retombe alors sur un mode de compatibilité cassé.
+#
+# bcrypt limite nativement les mots de passe à 72 bytes (limite de l'algo
+# lui-même, pas de ce code) : on tronque explicitement pour éviter que
+# bcrypt.hashpw ne lève une exception sur un mot de passe trop long.
+_BCRYPT_MAX_BYTES = 72
 
 
 def hash_password(plain_password: str) -> str:
     """Hash un mot de passe en clair avec bcrypt."""
-    return pwd_context.hash(plain_password)
+    password_bytes = plain_password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+    hashed = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
+    return hashed.decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Vérifie qu'un mot de passe en clair correspond au hash stocké."""
-    return pwd_context.verify(plain_password, hashed_password)
+    password_bytes = plain_password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+    try:
+        return bcrypt.checkpw(password_bytes, hashed_password.encode("utf-8"))
+    except ValueError:
+        # Hash mal formé / corrompu en base : on refuse plutôt que de planter.
+        return False
 
 
 def create_access_token(user_id: UUID, extra_claims: Optional[dict[str, Any]] = None) -> str:

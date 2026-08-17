@@ -8,7 +8,7 @@ import '../../../domain/repositories/conversation_repository.dart';
 class ConversationRemoteDataSource {
   final Dio _dio;
 
-  const ConversationRemoteDataSource(ApiClient apiClient) : _dio = apiClient.dio;
+  ConversationRemoteDataSource(ApiClient apiClient) : _dio = apiClient.dio;
 
   Future<ConversationResult> sendMessage(String content, List<ConversationMessage> history) async {
     final response = await _dio.post('/api/v1/conversation/message', data: {

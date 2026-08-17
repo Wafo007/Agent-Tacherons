@@ -15,7 +15,7 @@ class LoginTokens {
 class AuthRemoteDataSource {
   final Dio _dio;
 
-  const AuthRemoteDataSource(ApiClient apiClient) : _dio = apiClient.dio;
+  AuthRemoteDataSource(ApiClient apiClient) : _dio = apiClient.dio;
 
   Future<User> register({required String email, required String fullName, required String password}) async {
     final response = await _dio.post('/api/v1/auth/register', data: {
