@@ -31,7 +31,7 @@ apscheduler==3.10.4
 # Remplace faster-whisper (retiré : dépendait de ctranslate2, qui nécessite le
 # Visual C++ Redistributable sous Windows — cause de l'erreur ctranslate2.dll).
 SpeechRecognition==3.10.4
-edge-tts==6.1.19
+edge-tts==7.2.8
 
 # Dev / tests
 pytest==8.3.3
