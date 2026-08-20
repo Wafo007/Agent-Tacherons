@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../application/providers/auth_provider.dart';
+import '../../../../application/providers/background_listening_provider.dart';
 import '../../../../application/providers/settings_provider.dart';
 import '../../../../data/datasources/remote/settings_remote_datasource.dart';
 
@@ -57,6 +58,9 @@ class SettingsScreen extends ConsumerWidget {
                     onTap: () => _pickBriefingTime(context, ref, settings),
                   ),
                 ),
+                const SizedBox(height: 24),
+                _SectionTitle('Écoute permanente (bêta)'),
+                _BackgroundListeningCard(),
                 const SizedBox(height: 24),
                 _SectionTitle('Apparence'),
                 Card(
@@ -154,6 +158,68 @@ class _SectionTitle extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8, left: 4),
       child: Text(title, style: Theme.of(context).textTheme.titleSmall),
+    );
+  }
+}
+
+/// Carte de réglage pour l'écoute permanente ("Wafo") en arrière-plan
+/// (§ ANDROID SERVICE). Affiche explicitement les limites du système
+/// (notification obligatoire, dépendance à l'optimisation batterie) plutôt
+/// que de présenter la fonctionnalité comme un "always-on" sans contrainte.
+class _BackgroundListeningCard extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(backgroundListeningProvider);
+    final notifier = ref.read(backgroundListeningProvider.notifier);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: Column(
+          children: [
+            SwitchListTile(
+              title: const Text('Écouter « Wafo » même app fermée'),
+              subtitle: Text(
+                state.starting
+                    ? 'Activation en cours…'
+                    : 'Affiche une notification persistante (obligatoire sur Android). '
+                        "Peut s'arrêter si le système manque de mémoire ou si la batterie "
+                        'est fortement optimisée par le fabricant du téléphone.',
+              ),
+              value: state.enabled,
+              onChanged: state.starting
+                  ? null
+                  : (value) async {
+                      if (value) {
+                        await notifier.enable();
+                      } else {
+                        await notifier.disable();
+                      }
+                    },
+            ),
+            if (state.error != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Text(
+                  state.error!,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+            if (state.enabled) ...[
+              const Divider(height: 1),
+              ListTile(
+                title: const Text('Optimisation de la batterie'),
+                subtitle: const Text(
+                  "Pour limiter les risques que le système coupe l'écoute, exclus W4FO "
+                  "de l'optimisation de la batterie dans les réglages Android.",
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => notifier.openBatteryOptimizationSettings(),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }

@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../application/providers/background_listening_provider.dart';
 import '../../../../application/providers/voice_chat_provider.dart';
 import '../../../../application/state/voice_chat_state.dart';
 import '../../../../core/theme/app_colors.dart';
+import '../../../../core/voice/wafo_wake_word_detector.dart';
 import '../../../../domain/entities/conversation_message.dart';
 import '../widgets/mic_button.dart';
 import '../widgets/waveform_animation.dart';
@@ -15,21 +17,51 @@ class VoiceChatScreen extends ConsumerStatefulWidget {
   ConsumerState<VoiceChatScreen> createState() => _VoiceChatScreenState();
 }
 
-class _VoiceChatScreenState extends ConsumerState<VoiceChatScreen> {
+class _VoiceChatScreenState extends ConsumerState<VoiceChatScreen> with WidgetsBindingObserver {
   final _scrollController = ScrollController();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Connexion WebSocket différée après le premier frame pour éviter tout
     // appel réseau pendant la construction du widget.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(voiceChatProvider.notifier).connect();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await ref.read(voiceChatProvider.notifier).connect();
+      // Active l'écoute passive du Wake Word ("Wafo") au premier plan, SAUF
+      // si le Foreground Service d'écoute permanente (§ ANDROID SERVICE) est
+      // déjà actif : dans ce cas, c'est lui qui écoute (via le moteur
+      // headless), et démarrer une seconde session ici entrerait en conflit
+      // pour l'accès au micro. Traitement 100% local dans les deux cas (voir
+      // WafoWakeWordDetector) : aucune donnée n'est envoyée à Mistral tant
+      // que le mot-clé n'a pas été reconnu.
+      final backgroundServiceActive = ref.read(backgroundListeningProvider).enabled;
+      if (mounted && !backgroundServiceActive) {
+        await ref.read(voiceChatProvider.notifier).enableWakeWord(WafoWakeWordDetector());
+      }
     });
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState appState) {
+    final notifier = ref.read(voiceChatProvider.notifier);
+    switch (appState) {
+      case AppLifecycleState.resumed:
+        notifier.resumeWakeWordFromBackground();
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+      case AppLifecycleState.hidden:
+        // Respecte les restrictions Android modernes sur l'accès micro en
+        // arrière-plan : on met l'écoute passive en pause plutôt que de
+        // maintenir une session inutile (et coûteuse) hors premier plan.
+        notifier.pauseWakeWordForBackground();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _scrollController.dispose();
     super.dispose();
   }
@@ -45,7 +77,7 @@ class _VoiceChatScreenState extends ConsumerState<VoiceChatScreen> {
     });
   }
 
-  String _phaseLabel(VoiceChatPhase phase) {
+  String _phaseLabel(VoiceChatPhase phase, {required bool wakeWordActive}) {
     switch (phase) {
       case VoiceChatPhase.listening:
         return "Je t'écoute...";
@@ -60,7 +92,9 @@ class _VoiceChatScreenState extends ConsumerState<VoiceChatScreen> {
       case VoiceChatPhase.error:
         return 'Une erreur est survenue';
       case VoiceChatPhase.idle:
-        return 'Appuie pour parler';
+        // Cycle Wake Word : en attente, dis "Wafo" pour activer W4FO sans
+        // toucher l'écran (voir core/voice/wafo_wake_word_detector.dart).
+        return wakeWordActive ? 'Dis « Wafo » pour me parler' : 'Appuie pour parler';
     }
   }
 
@@ -81,7 +115,7 @@ class _VoiceChatScreenState extends ConsumerState<VoiceChatScreen> {
           children: [
             Expanded(
               child: state.messages.isEmpty
-                  ? _EmptyState(phaseLabel: _phaseLabel(state.phase))
+                  ? _EmptyState(phaseLabel: _phaseLabel(state.phase, wakeWordActive: state.wakeWordActive))
                   : ListView.builder(
                       controller: _scrollController,
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -96,7 +130,10 @@ class _VoiceChatScreenState extends ConsumerState<VoiceChatScreen> {
                 children: [
                   WaveformAnimation(isActive: state.phase == VoiceChatPhase.listening),
                   const SizedBox(height: 12),
-                  Text(_phaseLabel(state.phase), style: Theme.of(context).textTheme.bodyMedium),
+                  Text(
+                    _phaseLabel(state.phase, wakeWordActive: state.wakeWordActive),
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
                   const SizedBox(height: 20),
                   MicButton(
                     phase: state.phase,

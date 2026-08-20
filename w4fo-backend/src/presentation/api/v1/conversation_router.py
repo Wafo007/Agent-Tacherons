@@ -1,10 +1,10 @@
 """
 Endpoint de conversation textuelle, orchestrée par le graphe LangGraph.
 
-Ce endpoint REST est la première étape de validation du flux agentique de bout
-en bout, avant l'ajout du WebSocket vocal (STT/TTS) prévu à l'étape suivante
-de la roadmap. Il permet de tester le routage router → chat/task agent,
-le tool calling, et le mécanisme de confirmation des actions sensibles.
+Ce endpoint REST permet de tester de bout en bout la boucle agentique
+multi-outils (agent unique voyant tous les outils disponibles, capable d'en
+enchaîner plusieurs dans un même tour), le tool calling, et le mécanisme de
+confirmation des actions sensibles.
 """
 
 from fastapi import APIRouter
@@ -52,4 +52,6 @@ async def send_message(
         response=result.response,
         requires_confirmation=result.requires_confirmation,
         pending_tool_call=result.pending_tool_call,
+        tool_trace=result.tool_trace,
+        client_actions=result.client_actions,
     )

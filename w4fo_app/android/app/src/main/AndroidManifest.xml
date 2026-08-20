@@ -1,7 +1,27 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+
+    <!-- Micro : nécessaire à la fois pour la capture de commande existante
+         (package `record`) et pour l'écoute passive locale du Wake Word
+         "Wafo" (package `speech_to_text`, reconnaissance vocale on-device).
+         Ces deux usages sont couverts par la même permission Android. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- Requis par certains OEM pour la gestion de session audio pendant la
+         capture micro (évite des conflits de routage audio sur certains
+         appareils Android). -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+
+    <!-- Écoute vocale persistante en arrière-plan (§ ANDROID SERVICE) : ces
+         3 permissions sont TOUTES obligatoires pour qu'un Foreground Service
+         de type "microphone" puisse démarrer sur Android récent (10+ pour le
+         type de service, 13+ pour la notification). Sans elles, le service
+         `WafoBackgroundService` ne démarre pas (SecurityException). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
     <application
-        android:label="w4fo_app"
+        android:label="W4FO"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -31,6 +51,18 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- Foreground Service : écoute passive du mot-clé "Wafo" quand l'app
+             n'est pas au premier plan (§ ANDROID SERVICE). `exported=false` :
+             ce service n'est destiné qu'à W4FO lui-même, jamais appelé par une
+             autre application. `foregroundServiceType="microphone"` est
+             OBLIGATOIRE sur Android 14+ (sinon l'appel à `startForeground`
+             lève une exception) et doit correspondre à un usage réel du micro
+             — ce qui est le cas ici (voir WafoBackgroundService.kt). -->
+        <service
+            android:name=".WafoBackgroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

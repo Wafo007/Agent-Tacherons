@@ -11,7 +11,7 @@ from src.application.use_cases.manage_tasks.delete_task import DeleteTaskUseCase
 from src.application.use_cases.manage_tasks.list_tasks import ListTasksUseCase
 from src.application.use_cases.manage_tasks.update_task import UpdateTaskUseCase
 from src.core.dependencies import CurrentUserId, TaskRepo
-from src.core.exceptions import EntityNotFoundError
+from src.core.exceptions import EntityNotFoundError, UnauthorizedError
 from src.domain.value_objects.priority import TaskStatus
 from src.presentation.schemas.task_schema import CreateTaskRequest, TaskResponse, UpdateTaskRequest
 
@@ -47,7 +47,9 @@ async def list_tasks(
 
 
 @router.patch("/{task_id}", response_model=TaskResponse)
-async def update_task(task_id: UUID, request: UpdateTaskRequest, task_repository: TaskRepo) -> TaskResponse:
+async def update_task(
+    task_id: UUID, request: UpdateTaskRequest, user_id: CurrentUserId, task_repository: TaskRepo
+) -> TaskResponse:
     use_case = UpdateTaskUseCase(task_repository)
     try:
         task = await use_case.execute(
@@ -59,17 +61,22 @@ async def update_task(task_id: UUID, request: UpdateTaskRequest, task_repository
                 priority=request.priority,
                 status=request.status,
                 category=request.category,
-            )
+            ),
+            user_id=user_id,
         )
     except EntityNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except UnauthorizedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     return TaskResponse.model_validate(task)
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_task(task_id: UUID, task_repository: TaskRepo) -> None:
+async def delete_task(task_id: UUID, user_id: CurrentUserId, task_repository: TaskRepo) -> None:
     use_case = DeleteTaskUseCase(task_repository)
     try:
-        await use_case.execute(task_id)
+        await use_case.execute(task_id, user_id=user_id)
     except EntityNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except UnauthorizedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc

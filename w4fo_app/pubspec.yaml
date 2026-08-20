@@ -26,6 +26,17 @@ dependencies:
   just_audio: ^0.9.40
   path_provider: ^2.1.4
 
+  # --- Wake Word ("Wafo") : reconnaissance locale légère ---
+  # speech_to_text encapsule le moteur de reconnaissance vocale natif de l'OS
+  # (Android SpeechRecognizer / iOS Speech framework). Choisi plutôt qu'un
+  # moteur Wake Word dédié (ex. Porcupine) car : pas de binaire natif
+  # supplémentaire à embarquer, pas de clé d'accès tierce, aucune compilation
+  # C++ additionnelle, empreinte mémoire/CPU minimale, et déjà largement
+  # utilisé/maintenu dans l'écosystème Flutter. Le traitement audio reste
+  # entièrement local à l'appareil : aucune donnée n'est envoyée à Mistral
+  # pendant la phase d'écoute passive du mot-clé.
+  speech_to_text: ^7.0.0
+
   # --- Utilitaires ---
   intl: ^0.19.0
   equatable: ^2.0.5

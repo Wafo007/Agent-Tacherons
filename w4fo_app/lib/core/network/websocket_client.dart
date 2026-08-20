@@ -30,6 +30,17 @@ class RequiresConfirmationEvent extends VoiceServerEvent {
   const RequiresConfirmationEvent(this.toolCall);
 }
 
+/// Action applicative déclenchée par l'agent (§ ACTION GATEWAY côté backend),
+/// ex: navigation vers un écran. `action` est un code fermé (ex: "OPEN_TASKS")
+/// — voir `VoiceChatNotifier._handleClientAction` pour la liste exacte des
+/// codes reconnus côté client : tout code inconnu est ignoré, jamais exécuté
+/// à l'aveugle.
+class ClientActionEvent extends VoiceServerEvent {
+  final String action;
+  final Map<String, dynamic> payload;
+  const ClientActionEvent(this.action, this.payload);
+}
+
 class EndOfTurnEvent extends VoiceServerEvent {
   const EndOfTurnEvent();
 }
@@ -85,6 +96,13 @@ class VoiceWebSocketClient {
           _eventController.add(
             RequiresConfirmationEvent(decoded['tool_call'] as Map<String, dynamic>? ?? {}),
           );
+        case 'client_action':
+          final action = decoded['action'] as String?;
+          if (action != null && action.isNotEmpty) {
+            _eventController.add(
+              ClientActionEvent(action, decoded['payload'] as Map<String, dynamic>? ?? {}),
+            );
+          }
         case 'end_of_turn':
           _eventController.add(const EndOfTurnEvent());
       }

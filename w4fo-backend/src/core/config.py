@@ -46,6 +46,18 @@ class Settings(BaseSettings):
     # --- CORS ---
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    # --- Boucle agentique ---
+    # Nombre maximal d'itérations agent<->outils autorisées par tour de conversation,
+    # avant de forcer une réponse finale (garde-fou anti-boucle infinie).
+    agent_max_iterations: int = 6
+
+    # --- Fuseau horaire applicatif ---
+    # Utilisé pour ancrer la date/heure "actuelle" injectée dans le prompt système
+    # de l'agent, et pour résoudre les expressions temporelles relatives des tâches
+    # (§ DATE ET HEURE : "demain", "vendredi prochain", "dans 2 heures"...). Nom de
+    # zone IANA standard (ex: "Europe/Paris", "Africa/Douala").
+    app_timezone: str = "Europe/Paris"
+
 
 @lru_cache
 def get_settings() -> Settings:

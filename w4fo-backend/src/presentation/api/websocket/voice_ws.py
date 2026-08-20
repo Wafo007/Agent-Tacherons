@@ -18,7 +18,14 @@ Protocole du canal (multiplexé sur une seule connexion WebSocket, §10.2) :
     {"event": "agent_thinking"}
     {"event": "response_text", "text": "..."}
     {"event": "requires_confirmation", "tool_call": {...}}
+    {"event": "client_action", "action": "OPEN_TASKS", "payload": {...}}
     {"event": "end_of_turn"}
+
+L'événement `client_action` (§ ACTION GATEWAY) est émis une fois par action
+applicative déclenchée par l'agent durant le tour (ex: navigation Flutter via
+l'outil `app_navigate`) — voir `infrastructure/actions/action_registry.py`.
+Il est envoyé AVANT `response_text`, pour que le client puisse réagir
+(naviguer) dès que possible plutôt que d'attendre la fin de la synthèse vocale.
 - Le serveur envoie des frames BINAIRES = chunks audio de la réponse (MP3).
 
 Limitation V1 assumée : le graphe LangGraph est invoqué une fois le texte final
@@ -133,6 +140,17 @@ async def voice_conversation_ws(websocket: WebSocket, token: str, voice_id: str 
             if result.requires_confirmation:
                 await websocket.send_text(
                     json.dumps({"event": "requires_confirmation", "tool_call": result.pending_tool_call})
+                )
+
+            for client_action in result.client_actions:
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "event": "client_action",
+                            "action": client_action.get("action"),
+                            "payload": client_action.get("payload", {}),
+                        }
+                    )
                 )
 
             await websocket.send_text(json.dumps({"event": "response_text", "text": result.response}))
