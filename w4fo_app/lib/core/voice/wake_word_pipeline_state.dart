@@ -29,7 +29,9 @@ enum WakeWordPipelineState {
   wakeWordDetected,
   listeningCommand,
   processing,
+  executingAction,
   response,
+  stopped,
 }
 
 /// Calcule le [WakeWordPipelineState] courant à partir du macro-état du
@@ -57,6 +59,8 @@ WakeWordPipelineState resolveWakeWordPipelineState({
       return WakeWordPipelineState.listeningCommand;
     case VoiceEngineState.processing:
       return WakeWordPipelineState.processing;
+    case VoiceEngineState.executingAction:
+      return WakeWordPipelineState.executingAction;
     case VoiceEngineState.speaking:
       return WakeWordPipelineState.response;
     case VoiceEngineState.error:
@@ -64,5 +68,7 @@ WakeWordPipelineState resolveWakeWordPipelineState({
       // idle du point de vue du pipeline Wake Word (la gestion fine de
       // l'erreur reste portée par VoiceChatPhase.error / errorMessage).
       return WakeWordPipelineState.idle;
+    case VoiceEngineState.stopped:
+      return WakeWordPipelineState.stopped;
   }
 }

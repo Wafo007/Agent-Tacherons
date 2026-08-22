@@ -38,6 +38,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private var methodChannel: MethodChannel? = null
+    private var whatsAppMethodChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -75,6 +76,48 @@ class MainActivity : FlutterActivity() {
             }
         }
         methodChannel = channel
+
+        // § WHATSAPP (lecture + réponse on-device) : pont de contrôle séparé,
+        // volontairement distinct du canal ci-dessus (domaines fonctionnels
+        // différents — voir `WafoNotificationListenerService.kt`).
+        val whatsAppChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WafoNotificationListenerService.METHOD_CHANNEL)
+        whatsAppChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "hasNotificationAccess" -> result.success(hasNotificationListenerAccess())
+                "openNotificationAccessSettings" -> {
+                    startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                    result.success(null)
+                }
+                "setListeningEnabled" -> {
+                    WafoNotificationListenerService.listeningEnabled = call.argument<Boolean>("enabled") ?: false
+                    if (!WafoNotificationListenerService.listeningEnabled) {
+                        WafoNotificationListenerService.clearPending()
+                    }
+                    result.success(null)
+                }
+                "hasPendingMessage" -> result.success(WafoNotificationListenerService.hasPendingMessage())
+                "sendReply" -> {
+                    val text = call.argument<String>("text")
+                    if (text.isNullOrBlank()) {
+                        result.success(false)
+                    } else {
+                        result.success(WafoNotificationListenerService.sendReply(text))
+                    }
+                }
+                "clearPendingMessage" -> {
+                    WafoNotificationListenerService.clearPending()
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+        whatsAppMethodChannel = whatsAppChannel
+
+        // § WHATSAPP : branche le canal d'événements sur CE moteur (premier
+        // plan) — voir la doc de `WafoNotificationListenerService.registerEventChannel`
+        // pour la justification (c'est ici, et seulement ici, que vit
+        // l'arbre de widgets/providers Riverpod capable de traiter l'événement).
+        WafoNotificationListenerService.registerEventChannel(flutterEngine.dartExecutor.binaryMessenger)
 
         // Si cette Activity est (re)créée suite au lancement déclenché par le
         // service d'arrière-plan (mot-clé détecté), on le signale à Flutter
@@ -123,6 +166,19 @@ class MainActivity : FlutterActivity() {
     private fun isIgnoringBatteryOptimizations(): Boolean {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         return powerManager.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    /**
+     * Vérifie si l'utilisateur a accordé l'accès aux notifications à W4FO
+     * (§ WHATSAPP). Cette permission ne s'accorde JAMAIS silencieusement :
+     * elle passe obligatoirement par l'écran système ouvert via
+     * `openNotificationAccessSettings` ci-dessus, que l'utilisateur doit
+     * valider explicitement.
+     */
+    private fun hasNotificationListenerAccess(): Boolean {
+        val enabledListeners = Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
+            ?: return false
+        return enabledListeners.contains(packageName)
     }
 
     private fun openBatteryOptimizationSettings() {

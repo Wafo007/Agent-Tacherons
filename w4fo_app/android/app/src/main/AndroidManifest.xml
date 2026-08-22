@@ -63,13 +63,39 @@
             android:name=".WafoBackgroundService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
-    </application>
-    <!-- Required to query activities that can process text, see:
-         https://developer.android.com/training/package-visibility and
-         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
 
-         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+        <!-- § WHATSAPP (lecture + réponse on-device) : NotificationListenerService,
+             API Android standard (utilisée par ex. par Tasker, IFTTT, Wear OS).
+             Contrairement à FOREGROUND_SERVICE_MICROPHONE ci-dessus, l'accès aux
+             notifications n'est PAS une "uses-permission" classique : il s'accorde
+             via un écran système dédié (`ACTION_NOTIFICATION_LISTENER_SETTINGS`),
+             que Flutter ouvre via `WhatsAppController.openNotificationAccessSettings()`.
+             `BIND_NOTIFICATION_LISTENER_SERVICE` est la permission système que SEUL
+             Android peut accorder à ce service, jamais l'app elle-même — garantie
+             anti-usurpation standard de cette API. -->
+        <service
+            android:name=".WafoNotificationListenerService"
+            android:exported="false"
+            android:label="W4FO — Lecture des messages WhatsApp"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+    </application>
+    <!-- § WHATSAPP : nécessaire (Android 11+, package visibility) pour que
+         WafoNotificationListenerService puisse filtrer spécifiquement les
+         notifications provenant des packages WhatsApp (grand public et
+         WhatsApp Business), sans avoir à interroger la liste de TOUTES les
+         apps installées sur l'appareil (ce qui nécessiterait la permission
+         QUERY_ALL_PACKAGES, plus intrusive et volontairement évitée ici).
+
+         Fusionné avec le bloc `<queries>` existant (requis pour
+         ACTION_PROCESS_TEXT, utilisé par le moteur de texte de Flutter) —
+         voir https://developer.android.com/training/package-visibility. -->
     <queries>
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

@@ -73,3 +73,10 @@ class AgentState(TypedDict):
     # à relayer telles quelles au client (API REST et WebSocket) — voir
     # `infrastructure/actions/action_registry.py` et `tools/app_tools.py`.
     client_actions: list[dict[str, Any]]
+
+    # § SÉPARATION DES CONTEXTES (WhatsApp) : contexte TRANSITOIRE (un seul
+    # tour, jamais persisté dans l'historique de conversation) décrivant un
+    # message WhatsApp en attente de réponse — {"sender": str, "text": str}
+    # ou None. Fourni par le client (voir `voice_ws.py`), jamais stocké côté
+    # serveur au-delà de ce tour. Voir `tools/whatsapp_tools.py`.
+    whatsapp_context: Optional[dict[str, Any]]

@@ -12,66 +12,77 @@ import 'package:flutter/foundation.dart';
 import '../../core/di/injection.dart';
 import '../../core/network/websocket_client.dart';
 import '../../core/router/app_router.dart';
+import '../../core/voice/voice_state_machine.dart';
 import '../../core/voice/wake_word_detector.dart';
 import '../../domain/entities/conversation_message.dart';
 import '../state/voice_chat_state.dart';
+import 'whatsapp_provider.dart';
+
+/// Un mot annoncé par le serveur (`response_word`), en attente d'être révélé
+/// à l'écran au bon moment (relatif au DÉBUT de la lecture audio, pas à sa
+/// réception réseau — voir § TEXTE PROGRESSIF dans `voice_ws.py`).
+class _TimedWord {
+  final String text;
+  final int offsetMs;
+  const _TimedWord(this.text, this.offsetMs);
+}
+
+/// Délai maximal, côté client, d'attente d'une réponse serveur (transcript,
+/// timeout, etc.) après `end_of_speech` — filet de sécurité si la connexion
+/// est perdue silencieusement (le serveur applique sa propre limite de 15s,
+/// voir `COMMAND_TIMEOUT_SECONDS` dans `voice_ws.py`, mais si le réseau est
+/// coupé le client ne recevra jamais cet événement serveur).
+const _clientSafetyTimeout = Duration(seconds: 20);
 
 /// Orchestre le cycle complet de la conversation vocale côté client, en miroir
-/// exact du protocole défini côté backend (`voice_ws.py`, §10.1/§10.2 du
-/// document d'architecture) :
+/// exact du protocole défini côté backend (`voice_ws.py`).
 ///
-///   micro → chunks audio → WebSocket → [transcript, agent_thinking,
-///   response_text, audio chunks, end_of_turn] → lecture audio
+/// Toute transition d'état passe par [VoiceStateMachine] (`_machine`) — voir
+/// `core/voice/voice_state_machine.dart` pour la table de transitions
+/// complète et les 9 états explicites demandés par l'architecture Always-On.
+///
+/// § TEXTE PROGRESSIF : le texte de la réponse n'est JAMAIS affiché d'un
+/// bloc. Chaque mot (`ResponseWordEvent`) est mis en file d'attente
+/// ([_pendingWords]) puis révélé par un `Timer` programmé au moment exact où
+/// l'audio le prononce, à partir du DÉBUT réel de la lecture (voir
+/// [_playBufferedAudio]) — jamais au moment de la réception réseau du mot
+/// (sujette à la gigue), et jamais tout d'un coup à `end_of_turn`.
 ///
 /// Cette classe est volontairement le seul endroit de l'app qui touche à la
 /// fois `record` (capture micro) et `just_audio` (lecture) : les écrans ne
 /// manipulent que `VoiceChatState`, jamais les plugins audio directement.
-///
-/// Wake Word (voir `core/voice/wake_word_detector.dart` et
-/// `core/voice/wafo_wake_word_detector.dart`) : ce notifier orchestre le
-/// cycle complet demandé —
-///
-///   IDLE → LISTENING_FOR_WAKE_WORD → WAKE_WORD_DETECTED →
-///   LISTENING_COMMAND → PROCESSING → RESPONSE → LISTENING_FOR_WAKE_WORD
-///
-/// — via [enableWakeWord]/[disableWakeWord] (activation/désactivation
-/// complète) et [pauseWakeWordForBackground]/[resumeWakeWordFromBackground]
-/// (mise en pause légère, ex. lifecycle app). Le détecteur ne partage
-/// jamais le micro avec la capture de commande : [startListening] met
-/// systématiquement l'écoute passive en pause le temps de la commande, et
-/// elle est reprise automatiquement au retour à `idle` (voir
-/// [_resumeWakeWordIfEnabled]). Tant qu'aucun détecteur concret n'est
-/// branché, le comportement reste celui d'avant (déclenchement manuel via
-/// le bouton micro uniquement) : [_wakeWordDetector] vaut
-/// [NoOpWakeWordDetector] par défaut, qui ne détecte jamais rien et n'ouvre
-/// aucun accès micro ni réseau.
 class VoiceChatNotifier extends StateNotifier<VoiceChatState> {
   final Ref _ref;
   final VoiceWebSocketClient _wsClient = VoiceWebSocketClient();
   final AudioRecorder _recorder = AudioRecorder();
   final AudioPlayer _player = AudioPlayer();
+  final VoiceStateMachine _machine = VoiceStateMachine();
 
   final BytesBuilder _incomingAudioBuffer = BytesBuilder();
   StreamSubscription<Uint8List>? _micSubscription;
 
+  final List<_TimedWord> _pendingWords = [];
+  final List<String> _revealedWords = [];
+  final List<Timer> _wordRevealTimers = [];
+  Timer? _finalizeTimer;
+  String? _pendingFinalText;
+
+  Timer? _clientSafetyTimer;
+
   WakeWordDetector _wakeWordDetector = NoOpWakeWordDetector();
   StreamSubscription<void>? _wakeWordSubscription;
-
-  /// Vrai si l'utilisateur/l'app a activé le Wake Word (via
-  /// [enableWakeWord]), indépendamment du fait que l'écoute passive soit
-  /// momentanément en pause (ex. pendant une commande, ou app en arrière-plan).
   bool _wakeWordEnabled = false;
+
+  bool _disposed = false;
 
   VoiceChatNotifier(this._ref) : super(const VoiceChatState());
 
+  // ---------------------------------------------------------------------
+  // Wake Word (écoute passive)
+  // ---------------------------------------------------------------------
+
   /// Branche un détecteur de mot-clé de réveil et démarre l'écoute passive
-  /// locale (LISTENING_FOR_WAKE_WORD). Dès que le détecteur signale une
-  /// détection (WAKE_WORD_DETECTED), la capture de commande réelle démarre
-  /// automatiquement via le pipeline existant ([startListening]).
-  ///
-  /// Par construction (voir [WakeWordDetector]), le détecteur ne doit
-  /// jamais transmettre de flux audio continu au réseau : il se contente
-  /// d'émettre un signal local.
+  /// locale (LISTENING_FOR_WAKE_WORD).
   Future<void> enableWakeWord(WakeWordDetector detector) async {
     await _wakeWordSubscription?.cancel();
     await _wakeWordDetector.dispose();
@@ -79,19 +90,20 @@ class VoiceChatNotifier extends StateNotifier<VoiceChatState> {
     _wakeWordDetector = detector;
     _wakeWordEnabled = true;
     _wakeWordSubscription = detector.onWakeWordDetected.listen((_) {
-      if (state.phase == VoiceChatPhase.idle) {
+      if (_machine.state == VoiceMachineState.listeningForWakeWord ||
+          _machine.state == VoiceMachineState.idle) {
+        _machine.fire(VoiceMachineEvent.wakeWordDetected);
         startListening();
       }
     });
 
-    if (state.phase == VoiceChatPhase.idle) {
+    if (_machine.state == VoiceMachineState.idle) {
+      _machine.fire(VoiceMachineEvent.start);
       await _wakeWordDetector.start();
-      state = state.copyWith(wakeWordActive: true);
+      _setState(phase: VoiceChatPhase.idle, wakeWordActive: true);
     }
   }
 
-  /// Débranche le détecteur de mot-clé actif et revient à un détecteur
-  /// neutre (aucune écoute passive, IDLE au sens du pipeline Wake Word).
   Future<void> disableWakeWord() async {
     _wakeWordEnabled = false;
     await _wakeWordSubscription?.cancel();
@@ -99,102 +111,152 @@ class VoiceChatNotifier extends StateNotifier<VoiceChatState> {
     await _wakeWordDetector.stop();
     await _wakeWordDetector.dispose();
     _wakeWordDetector = NoOpWakeWordDetector();
-    state = state.copyWith(wakeWordActive: false);
+    _machine.fire(VoiceMachineEvent.stop);
+    _setState(phase: VoiceChatPhase.stopped, wakeWordActive: false);
   }
 
-  /// Met l'écoute passive du Wake Word en pause sans la désactiver
-  /// (contrairement à [disableWakeWord], le détecteur n'est pas jeté). À
-  /// utiliser quand l'app passe en arrière-plan : les restrictions Android
-  /// modernes limitent de toute façon l'accès micro hors premier plan, donc
-  /// on libère proactivement la ressource plutôt que de laisser une session
-  /// STT tourner inutilement.
   Future<void> pauseWakeWordForBackground() async {
     await _wakeWordDetector.stop();
-    state = state.copyWith(wakeWordActive: false);
+    _setState(wakeWordActive: false);
   }
 
-  /// Reprend l'écoute passive du Wake Word après une pause (ex. retour au
-  /// premier plan), uniquement si elle avait été activée et que l'app est
-  /// bien en attente (idle) — jamais pendant une commande en cours.
   Future<void> resumeWakeWordFromBackground() async {
-    if (_wakeWordEnabled && state.phase == VoiceChatPhase.idle) {
+    if (_wakeWordEnabled && _machine.state == VoiceMachineState.idle) {
+      _machine.fire(VoiceMachineEvent.start);
       await _wakeWordDetector.start();
-      state = state.copyWith(wakeWordActive: true);
+      _setState(phase: VoiceChatPhase.idle, wakeWordActive: true);
     }
   }
 
-  /// Reprend automatiquement l'écoute passive du Wake Word dès que l'on
-  /// revient à `idle` après une commande (PROCESSING/RESPONSE terminés),
-  /// bouclant ainsi le cycle LISTENING_COMMAND → PROCESSING → RESPONSE →
-  /// LISTENING_FOR_WAKE_WORD. N'a aucun effet si le Wake Word n'a pas été
-  /// activé.
   void _resumeWakeWordIfEnabled() {
     if (!_wakeWordEnabled) return;
+    _machine.fire(VoiceMachineEvent.start);
     unawaited(_wakeWordDetector.start());
-    state = state.copyWith(wakeWordActive: true);
+    _setState(wakeWordActive: true);
   }
 
-  /// Établit la connexion WebSocket vocale. À appeler une fois à l'ouverture de l'écran.
+  // ---------------------------------------------------------------------
+  // Connexion
+  // ---------------------------------------------------------------------
+
   Future<void> connect() async {
     final accessToken = await _ref.read(authRepositoryProvider).getAccessToken();
     if (accessToken == null) {
-      state = state.copyWith(phase: VoiceChatPhase.error, errorMessage: 'Non authentifié.');
+      _fireError('Non authentifié.');
       return;
     }
 
-    await _wsClient.connect(accessToken: accessToken);
-    _wsClient.events.listen(_handleServerEvent, onError: (_) {
-      state = state.copyWith(phase: VoiceChatPhase.error, errorMessage: 'Connexion vocale perdue.');
-    });
+    try {
+      await _wsClient.connect(accessToken: accessToken);
+    } catch (_) {
+      _fireError('Impossible de se connecter au service vocal.');
+      return;
+    }
+
+    _wsClient.events.listen(
+      _handleServerEvent,
+      onError: (_) => _fireError('Connexion vocale perdue.'),
+    );
   }
+
+  /// Permet de retenter une connexion après une erreur réseau (§ INTERRUPTION :
+  /// perte réseau). Réinitialise la machine à `idle` avant de reconnecter.
+  Future<void> retryConnection() async {
+    _machine.fire(VoiceMachineEvent.reset);
+    _setState(phase: VoiceChatPhase.idle, errorMessage: null);
+    await connect();
+  }
+
+  void _fireError(String message) {
+    _cancelAllTimersAndAudio();
+    _machine.fire(VoiceMachineEvent.errorOccurred);
+    _setState(phase: VoiceChatPhase.error, errorMessage: message);
+  }
+
+  // ---------------------------------------------------------------------
+  // Événements serveur
+  // ---------------------------------------------------------------------
 
   void _handleServerEvent(VoiceServerEvent event) {
     switch (event) {
       case TranscriptEvent(text: final text):
         if (text.isEmpty) {
-          state = state.copyWith(phase: VoiceChatPhase.idle, clearLiveTranscript: true);
+          _machine.fire(VoiceMachineEvent.interrupted);
+          _setState(phase: VoiceChatPhase.idle, clearLiveTranscript: true);
           _resumeWakeWordIfEnabled();
           return;
         }
         final userMessage = ConversationMessage(role: MessageRole.user, content: text);
-        state = state.copyWith(
-          messages: [...state.messages, userMessage],
-          clearLiveTranscript: true,
-        );
+        _setState(messages: [...state.messages, userMessage], clearLiveTranscript: true);
 
       case AgentThinkingEvent():
-        state = state.copyWith(phase: VoiceChatPhase.thinking);
+        _setState(phase: VoiceChatPhase.thinking);
 
-      case ResponseTextEvent(text: final text):
-        final assistantMessage = ConversationMessage(role: MessageRole.assistant, content: text);
-        state = state.copyWith(messages: [...state.messages, assistantMessage]);
+      case ToolCallsSummaryEvent(tools: final tools):
+        // § EXECUTING_ACTION — voir limitation documentée dans le rapport de
+        // livraison : cet événement est rétrospectif (les outils ont déjà
+        // fini de s'exécuter côté serveur au moment où il arrive), pas un
+        // flux temps réel outil par outil.
+        _machine.fire(VoiceMachineEvent.toolsExecuting);
+        _setState(phase: VoiceChatPhase.executingAction, lastExecutedTools: tools);
+
+      case ResponseWordEvent(text: final text, offsetMs: final offsetMs):
+        if (_pendingWords.isEmpty) {
+          _machine.fire(VoiceMachineEvent.responseReady);
+          _setState(phase: VoiceChatPhase.speaking, clearStreamingResponseText: true);
+        }
+        _pendingWords.add(_TimedWord(text, offsetMs));
+
+      case ResponseTextFinalEvent(text: final text):
+        // Réconciliation uniquement (voir doc de classe) : ne touche PAS
+        // l'affichage progressif en cours, seulement le texte qui sera
+        // enregistré dans l'historique une fois la lecture terminée.
+        _pendingFinalText = text;
 
       case RequiresConfirmationEvent(toolCall: final toolCall):
-        state = state.copyWith(phase: VoiceChatPhase.awaitingConfirmation, pendingToolCall: toolCall);
+        _setState(phase: VoiceChatPhase.awaitingConfirmation, pendingToolCall: toolCall);
 
       case ClientActionEvent(action: final action, payload: final payload):
         _handleClientAction(action, payload);
 
+      case CommandTimeoutEvent():
+        // Le serveur a abandonné l'attente d'un `end_of_speech` (§ INTERRUPTION :
+        // timeout). Le micro côté client était probablement resté ouvert sans
+        // que l'utilisateur ne parle : on nettoie et on revient à l'écoute passive.
+        unawaited(_abortCommandCapture());
+        _machine.fire(VoiceMachineEvent.timeout);
+        _setState(phase: VoiceChatPhase.idle, clearLiveTranscript: true);
+        _resumeWakeWordIfEnabled();
+
+      case InterruptedEvent():
+        // Confirmation serveur qu'un `interrupt` a bien annulé le traitement
+        // ou la lecture en cours (barge-in réel, pas seulement local).
+        _cancelAllTimersAndAudio();
+        _machine.fire(VoiceMachineEvent.interrupted);
+        _setState(phase: VoiceChatPhase.idle, clearStreamingResponseText: true);
+        _resumeWakeWordIfEnabled();
+
       case AudioChunkEvent(data: final data):
-        state = state.copyWith(phase: VoiceChatPhase.speaking);
         _incomingAudioBuffer.add(data);
 
       case EndOfTurnEvent():
         _playBufferedAudio();
-        state = state.copyWith(phase: VoiceChatPhase.idle, clearPendingToolCall: false);
-        _resumeWakeWordIfEnabled();
     }
   }
 
-  /// Exécute une action applicative déclenchée par l'agent (§ ACTION GATEWAY
-  /// côté backend, voir `infrastructure/actions/action_registry.py`).
-  ///
-  /// Sécurité : seuls les codes explicitement listés ci-dessous déclenchent
-  /// une navigation réelle, vers une route EXISTANTE et FIXE de l'app
-  /// (`AppRoutes`). Aucune route dynamique n'est construite à partir d'une
-  /// chaîne fournie par le serveur — tout code inconnu est silencieusement
-  /// ignoré (pas d'exécution "au mieux", pas de fallback permissif).
   void _handleClientAction(String action, Map<String, dynamic> payload) {
+    if (action == 'WHATSAPP_REPLY') {
+      // § WHATSAPP : ce n'est pas une navigation — délègue à WhatsAppNotifier,
+      // qui appelle le natif (RemoteInput sur la notification WhatsApp en
+      // attente) et met à jour sa propre conversation locale (§ CONTEXTE :
+      // jamais mélangée à `state.messages`, la conversation Flutter/voix).
+      final text = payload['text'] as String?;
+      if (text != null && text.isNotEmpty) {
+        unawaited(_ref.read(whatsAppProvider.notifier).sendReply(text));
+      }
+      return;
+    }
+
     final route = switch (action) {
       'OPEN_HOME' => AppRoutes.home,
       'OPEN_TASKS' => AppRoutes.tasks,
@@ -213,70 +275,253 @@ class VoiceChatNotifier extends StateNotifier<VoiceChatState> {
     _ref.read(routerProvider).go(route);
   }
 
-  /// Écrit l'audio accumulé (MP3, streamé chunk par chunk par edge-tts côté
-  /// backend) dans un fichier temporaire, puis le joue via just_audio.
-  ///
-  /// Limitation assumée (cohérente avec le backend, voir §10.2) : la lecture
-  /// démarre seulement une fois TOUS les chunks reçus, pas au fil de l'eau —
-  /// le backend lui-même n'envoie la réponse qu'une fois le texte complet
-  /// généré (pas de découpage phrase par phrase pour l'instant).
+  // ---------------------------------------------------------------------
+  // Lecture audio + révélation progressive du texte (§ TEXTE PROGRESSIF)
+  // ---------------------------------------------------------------------
+
+  /// Écrit l'audio accumulé dans un fichier temporaire, démarre la lecture,
+  /// puis programme la révélation de chaque mot annoncé (`_pendingWords`) au
+  /// moment EXACT où l'audio le prononce, à partir de l'instant réel où la
+  /// lecture démarre — pas à la réception réseau du mot.
   Future<void> _playBufferedAudio() async {
     final audioBytes = _incomingAudioBuffer.takeBytes();
-    if (audioBytes.isEmpty) return;
+    final words = List<_TimedWord>.from(_pendingWords);
+    _pendingWords.clear();
+
+    if (audioBytes.isEmpty) {
+      // Réponse sans audio (cas limite, ex. TTS indisponible) : on finalise
+      // directement avec le texte complet plutôt que de rester bloqué.
+      _finalizeTurn();
+      return;
+    }
 
     final tempDir = await getTemporaryDirectory();
     final file = File('${tempDir.path}/w4fo_response_${DateTime.now().millisecondsSinceEpoch}.mp3');
     await file.writeAsBytes(audioBytes);
 
+    if (_disposed) return;
+
     await _player.setFilePath(file.path);
-    await _player.play();
+    unawaited(_player.play());
+
+    for (final timer in _wordRevealTimers) {
+      timer.cancel();
+    }
+    _wordRevealTimers.clear();
+    _revealedWords.clear();
+
+    for (final word in words) {
+      final timer = Timer(Duration(milliseconds: word.offsetMs), () {
+        if (_disposed) return;
+        _revealedWords.add(word.text);
+        _setState(streamingResponseText: _revealedWords.join(' '));
+      });
+      _wordRevealTimers.add(timer);
+    }
+
+    // Finalise le tour un court instant après le dernier mot prévu (laisse
+    // le temps à l'audio de terminer sa dernière syllabe) — voir doc de
+    // classe : c'est cette temporisation qui garantit que le texte reste
+    // affiché progressivement jusqu'à la fin réelle de la lecture, plutôt
+    // que de basculer d'un coup dès `end_of_turn` (qui arrive bien avant la
+    // fin de la lecture audio).
+    final lastOffset = words.isEmpty ? 0 : words.last.offsetMs;
+    _finalizeTimer?.cancel();
+    _finalizeTimer = Timer(Duration(milliseconds: lastOffset + 600), _finalizeTurn);
   }
+
+  void _finalizeTurn() {
+    if (_disposed) return;
+    final finalText = _pendingFinalText ?? (_revealedWords.isEmpty ? null : _revealedWords.join(' '));
+    _pendingFinalText = null;
+
+    if (finalText != null && finalText.isNotEmpty) {
+      final assistantMessage = ConversationMessage(role: MessageRole.assistant, content: finalText);
+      _setState(messages: [...state.messages, assistantMessage], clearStreamingResponseText: true);
+    } else {
+      _setState(clearStreamingResponseText: true);
+    }
+
+    if (_machine.state == VoiceMachineState.responding) {
+      _machine.fire(VoiceMachineEvent.turnComplete);
+    } else {
+      // Réponse sans aucun mot annoncé (ex. texte vide / TTS indisponible) :
+      // on n'est jamais passé par `responding` (aucun ResponseWordEvent
+      // reçu), donc `turnComplete` serait rejeté. `interrupted` est une
+      // transition valide depuis `processing`/`executingAction` vers `idle`,
+      // et couvre correctement ce cas limite sans bloquer la machine.
+      _machine.fire(VoiceMachineEvent.interrupted);
+    }
+    _setState(phase: VoiceChatPhase.idle, clearPendingToolCall: false);
+    _resumeWakeWordIfEnabled();
+  }
+
+  void _cancelAllTimersAndAudio() {
+    for (final timer in _wordRevealTimers) {
+      timer.cancel();
+    }
+    _wordRevealTimers.clear();
+    _finalizeTimer?.cancel();
+    _finalizeTimer = null;
+    _pendingWords.clear();
+    _revealedWords.clear();
+    _pendingFinalText = null;
+    _incomingAudioBuffer.clear();
+    unawaited(_player.stop());
+  }
+
+  // ---------------------------------------------------------------------
+  // Capture de commande
+  // ---------------------------------------------------------------------
 
   /// Démarre la capture micro et transmet les chunks audio en direct au serveur.
   ///
-  /// Déclenché soit manuellement (bouton micro), soit automatiquement par
-  /// [enableWakeWord] après détection de "Wafo" (WAKE_WORD_DETECTED →
-  /// LISTENING_COMMAND). Dans les deux cas, l'écoute passive du Wake Word
-  /// est mise en pause en premier : le micro ne doit jamais être partagé
-  /// entre les deux usages simultanément.
+  /// § INTERRUPTION (perte microphone) : toute erreur du flux d'enregistrement
+  /// (permission révoquée en cours de session, périphérique audio perdu...)
+  /// bascule proprement en état d'erreur plutôt que de laisser une capture
+  /// fantôme ouverte.
   Future<void> startListening() async {
     if (_wakeWordEnabled) {
       await _wakeWordDetector.stop();
-      state = state.copyWith(wakeWordActive: false);
+      _setState(wakeWordActive: false);
     }
 
     if (!await _recorder.hasPermission()) {
-      state = state.copyWith(phase: VoiceChatPhase.error, errorMessage: 'Permission micro refusée.');
+      _fireError('Permission microphone refusée.');
       return;
     }
 
-    state = state.copyWith(phase: VoiceChatPhase.listening, clearLiveTranscript: true);
+    _machine.fire(VoiceMachineEvent.beginCommandCapture);
+    _setState(phase: VoiceChatPhase.listening, clearLiveTranscript: true);
 
-    final stream = await _recorder.startStream(
-      const RecordConfig(encoder: AudioEncoder.pcm16bits, sampleRate: 16000, numChannels: 1),
-    );
+    _clientSafetyTimer?.cancel();
+    _clientSafetyTimer = Timer(_clientSafetyTimeout, () {
+      // Filet de sécurité : ni transcript, ni command_timeout, ni erreur du
+      // serveur reçus après un délai large — connexion probablement perdue
+      // silencieusement (§ INTERRUPTION : perte réseau).
+      unawaited(_abortCommandCapture());
+      _fireError('Aucune réponse du serveur vocal (connexion perdue ?).');
+    });
 
-    _micSubscription = stream.listen((chunk) => _wsClient.sendAudioChunk(chunk));
+    try {
+      final stream = await _recorder.startStream(
+        const RecordConfig(encoder: AudioEncoder.pcm16bits, sampleRate: 16000, numChannels: 1),
+      );
+      _micSubscription = stream.listen(
+        (chunk) => _wsClient.sendAudioChunk(chunk),
+        onError: (_) {
+          unawaited(_abortCommandCapture());
+          _fireError('Le microphone est devenu indisponible pendant la capture.');
+        },
+      );
+    } catch (_) {
+      _clientSafetyTimer?.cancel();
+      _fireError("Impossible d'accéder au microphone.");
+    }
   }
 
   /// Arrête la capture micro et signale la fin du segment de parole au serveur.
   Future<void> stopListening() async {
+    _clientSafetyTimer?.cancel();
     await _recorder.stop();
     await _micSubscription?.cancel();
-    _wsClient.sendEndOfSpeech();
-    state = state.copyWith(phase: VoiceChatPhase.transcribing);
+    // § CONTEXTE (WhatsApp) : si un message WhatsApp est en attente de
+    // réponse, on l'attache à CE tour uniquement (voir
+    // `WhatsAppNotifier.consumePendingContextForNextCommand` — contexte
+    // transitoire, jamais mélangé à l'historique de conversation Flutter).
+    final whatsappContext = _ref.read(whatsAppProvider.notifier).consumePendingContextForNextCommand();
+    _wsClient.sendEndOfSpeech(whatsappContext: whatsappContext);
+    _machine.fire(VoiceMachineEvent.endCommandCapture);
+    _setState(phase: VoiceChatPhase.transcribing);
   }
 
-  /// Barge-in : l'utilisateur interrompt la réponse en cours de lecture.
+  /// Nettoyage local (sans notifier le serveur, déjà fait pour nous côté
+  /// serveur ou plus nécessaire) d'une capture de commande en cours —
+  /// utilisé par le timeout serveur et le filet de sécurité client.
+  Future<void> _abortCommandCapture() async {
+    _clientSafetyTimer?.cancel();
+    await _recorder.stop();
+    await _micSubscription?.cancel();
+  }
+
+  /// Barge-in local : l'utilisateur interrompt la réponse en cours de lecture,
+  /// ou annule une capture/un traitement en cours. Envoie `interrupt` au
+  /// serveur (qui l'applique aussi bien pendant le raisonnement agent que
+  /// pendant le streaming TTS — voir `voice_ws.py`), et nettoie l'état local
+  /// immédiatement sans attendre la confirmation serveur (UX réactive).
   Future<void> interrupt() async {
-    await _player.stop();
+    _cancelAllTimersAndAudio();
+    await _micSubscription?.cancel();
+    await _recorder.stop();
     _wsClient.sendInterrupt();
-    state = state.copyWith(phase: VoiceChatPhase.idle);
+    _machine.fire(VoiceMachineEvent.interrupted);
+    _setState(phase: VoiceChatPhase.idle, clearStreamingResponseText: true);
     _resumeWakeWordIfEnabled();
+  }
+
+  /// § INTERRUPTION (application suspendue) : à appeler depuis le cycle de
+  /// vie de l'écran (`AppLifecycleState.paused`/`inactive`) quand une
+  /// capture, un traitement ou une lecture est en cours — évite de laisser
+  /// le micro ouvert ou une session fantôme pendant que l'app n'est plus au
+  /// premier plan. Si le pipeline est simplement en écoute passive du mot-clé,
+  /// utiliser [pauseWakeWordForBackground] à la place (comportement inchangé).
+  Future<void> handleAppSuspended() async {
+    switch (_machine.state) {
+      case VoiceMachineState.listeningCommand:
+      case VoiceMachineState.processing:
+      case VoiceMachineState.executingAction:
+      case VoiceMachineState.responding:
+        await interrupt();
+      case VoiceMachineState.idle:
+      case VoiceMachineState.listeningForWakeWord:
+      case VoiceMachineState.wakeWordDetected:
+      case VoiceMachineState.error:
+      case VoiceMachineState.stopped:
+        break;
+    }
+    await pauseWakeWordForBackground();
+  }
+
+  // ---------------------------------------------------------------------
+
+  void _setState({
+    VoiceChatPhase? phase,
+    List<ConversationMessage>? messages,
+    String? liveTranscript,
+    Map<String, dynamic>? pendingToolCall,
+    String? errorMessage,
+    String? streamingResponseText,
+    List<Map<String, dynamic>>? lastExecutedTools,
+    bool clearLiveTranscript = false,
+    bool clearPendingToolCall = false,
+    bool clearStreamingResponseText = false,
+    bool? wakeWordActive,
+  }) {
+    if (_disposed) return;
+    state = state.copyWith(
+      phase: phase,
+      machineState: _machine.state,
+      messages: messages,
+      liveTranscript: liveTranscript,
+      pendingToolCall: pendingToolCall,
+      errorMessage: errorMessage,
+      streamingResponseText: streamingResponseText,
+      lastExecutedTools: lastExecutedTools,
+      clearLiveTranscript: clearLiveTranscript,
+      clearPendingToolCall: clearPendingToolCall,
+      clearStreamingResponseText: clearStreamingResponseText,
+      wakeWordActive: wakeWordActive,
+    );
   }
 
   @override
   void dispose() {
+    _disposed = true;
+    _clientSafetyTimer?.cancel();
+    for (final timer in _wordRevealTimers) {
+      timer.cancel();
+    }
+    _finalizeTimer?.cancel();
     _micSubscription?.cancel();
     _wakeWordSubscription?.cancel();
     _wakeWordDetector.dispose();

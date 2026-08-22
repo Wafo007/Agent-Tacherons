@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../application/providers/auth_provider.dart';
 import '../../../../application/providers/background_listening_provider.dart';
 import '../../../../application/providers/settings_provider.dart';
+import '../../../../application/providers/whatsapp_provider.dart';
 import '../../../../data/datasources/remote/settings_remote_datasource.dart';
 
 class SettingsScreen extends ConsumerWidget {
@@ -61,6 +62,9 @@ class SettingsScreen extends ConsumerWidget {
                 const SizedBox(height: 24),
                 _SectionTitle('Écoute permanente (bêta)'),
                 _BackgroundListeningCard(),
+                const SizedBox(height: 24),
+                _SectionTitle('WhatsApp (bêta)'),
+                _WhatsAppCard(),
                 const SizedBox(height: 24),
                 _SectionTitle('Apparence'),
                 Card(
@@ -217,6 +221,100 @@ class _BackgroundListeningCard extends ConsumerWidget {
                 onTap: () => notifier.openBatteryOptimizationSettings(),
               ),
             ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Carte de réglage pour la lecture/réponse WhatsApp on-device (§ WHATSAPP).
+///
+/// Explique explicitement le mécanisme (accès aux notifications + réponse
+/// via l'action native de la notification) plutôt que de présenter ceci
+/// comme une intégration Meta officielle — ce n'en est pas une (voir
+/// `core/whatsapp/README.md`).
+class _WhatsAppCard extends ConsumerStatefulWidget {
+  @override
+  ConsumerState<_WhatsAppCard> createState() => _WhatsAppCardState();
+}
+
+class _WhatsAppCardState extends ConsumerState<_WhatsAppCard> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(whatsAppProvider.notifier).refreshPermissionStatus();
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState appState) {
+    if (appState == AppLifecycleState.resumed) {
+      // L'utilisateur revient probablement de l'écran système d'accès aux
+      // notifications — on réévalue l'état réel plutôt que de supposer.
+      ref.read(whatsAppProvider.notifier).refreshPermissionStatus();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = ref.watch(whatsAppProvider);
+    final notifier = ref.read(whatsAppProvider.notifier);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Text(
+                "W4FO peut lire à voix haute tes messages WhatsApp reçus et y répondre à ta "
+                "demande, directement depuis ton numéro personnel — sans passer par les serveurs "
+                "de Meta. Ceci utilise l'action \"Répondre\" intégrée par WhatsApp à ses "
+                "notifications, pas une intégration officielle Meta.",
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
+            if (!state.hasNotificationAccess)
+              ListTile(
+                title: const Text("Autoriser l'accès aux notifications"),
+                subtitle: const Text('Requis pour lire les messages WhatsApp reçus.'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => notifier.requestNotificationAccess(),
+              )
+            else
+              SwitchListTile(
+                title: const Text('Lire et répondre à mes messages WhatsApp'),
+                subtitle: const Text(
+                  'Dis "Wafo" après une annonce de message pour y répondre à voix haute.',
+                ),
+                value: state.listeningEnabled,
+                onChanged: (value) async {
+                  if (value) {
+                    await notifier.enable();
+                  } else {
+                    await notifier.disable();
+                  }
+                },
+              ),
+            if (state.lastError != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Text(
+                  state.lastError!,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
           ],
         ),
       ),

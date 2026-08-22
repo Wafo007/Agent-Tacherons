@@ -52,10 +52,13 @@ class _VoiceChatScreenState extends ConsumerState<VoiceChatScreen> with WidgetsB
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
       case AppLifecycleState.hidden:
-        // Respecte les restrictions Android modernes sur l'accès micro en
-        // arrière-plan : on met l'écoute passive en pause plutôt que de
-        // maintenir une session inutile (et coûteuse) hors premier plan.
-        notifier.pauseWakeWordForBackground();
+        // § INTERRUPTION (application suspendue) : si une capture, un
+        // traitement ou une réponse est en cours, on l'annule proprement
+        // (micro fermé, `interrupt` envoyé au serveur) plutôt que de laisser
+        // une session fantôme continuer hors premier plan — puis on respecte
+        // les restrictions Android modernes sur l'accès micro en arrière-plan
+        // en mettant l'écoute passive du Wake Word en pause.
+        notifier.handleAppSuspended();
     }
   }
 
@@ -85,12 +88,16 @@ class _VoiceChatScreenState extends ConsumerState<VoiceChatScreen> with WidgetsB
         return 'Transcription en cours...';
       case VoiceChatPhase.thinking:
         return 'Je réfléchis...';
+      case VoiceChatPhase.executingAction:
+        return "J'exécute l'action...";
       case VoiceChatPhase.speaking:
         return 'Je réponds...';
       case VoiceChatPhase.awaitingConfirmation:
         return 'En attente de ta confirmation';
       case VoiceChatPhase.error:
-        return 'Une erreur est survenue';
+        return "Une erreur est survenue";
+      case VoiceChatPhase.stopped:
+        return 'Écoute désactivée';
       case VoiceChatPhase.idle:
         // Cycle Wake Word : en attente, dis "Wafo" pour activer W4FO sans
         // toucher l'écran (voir core/voice/wafo_wake_word_detector.dart).
@@ -103,10 +110,20 @@ class _VoiceChatScreenState extends ConsumerState<VoiceChatScreen> with WidgetsB
     final state = ref.watch(voiceChatProvider);
 
     ref.listen(voiceChatProvider, (previous, next) {
-      if (previous?.messages.length != next.messages.length) {
+      final messagesChanged = previous?.messages.length != next.messages.length;
+      final streamingChanged = previous?.streamingResponseText != next.streamingResponseText;
+      if (messagesChanged || streamingChanged) {
         _scrollToBottom();
       }
     });
+
+    // § TEXTE PROGRESSIF : le message assistant en cours de génération
+    // n'est PAS encore dans `state.messages` (il n'y rejoint qu'une fois le
+    // tour terminé, voir `VoiceChatNotifier._finalizeTurn`) — on l'affiche
+    // séparément, comme un message temporaire, tant qu'il est en cours de
+    // révélation mot par mot en synchronisation avec l'audio.
+    final hasStreamingText = state.streamingResponseText != null && state.streamingResponseText!.isNotEmpty;
+    final totalItemCount = state.messages.length + (hasStreamingText ? 1 : 0);
 
     return Scaffold(
       appBar: AppBar(title: const Text('W4FO')),
@@ -114,15 +131,29 @@ class _VoiceChatScreenState extends ConsumerState<VoiceChatScreen> with WidgetsB
         child: Column(
           children: [
             Expanded(
-              child: state.messages.isEmpty
+              child: totalItemCount == 0
                   ? _EmptyState(phaseLabel: _phaseLabel(state.phase, wakeWordActive: state.wakeWordActive))
                   : ListView.builder(
                       controller: _scrollController,
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                      itemCount: state.messages.length,
-                      itemBuilder: (context, index) => _MessageBubble(message: state.messages[index]),
+                      itemCount: totalItemCount,
+                      itemBuilder: (context, index) {
+                        if (index < state.messages.length) {
+                          return _MessageBubble(message: state.messages[index]);
+                        }
+                        // Dernier item = bulle "en cours de frappe", contenu
+                        // révélé progressivement par le provider.
+                        return _MessageBubble(
+                          message: ConversationMessage(
+                            role: MessageRole.assistant,
+                            content: state.streamingResponseText!,
+                          ),
+                          isStreaming: true,
+                        );
+                      },
                     ),
             ),
+            if (state.phase == VoiceChatPhase.error) _ErrorBanner(message: state.errorMessage),
             if (state.phase == VoiceChatPhase.awaitingConfirmation) _ConfirmationBanner(toolCall: state.pendingToolCall),
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 24),
@@ -178,7 +209,8 @@ class _EmptyState extends StatelessWidget {
 
 class _MessageBubble extends StatelessWidget {
   final ConversationMessage message;
-  const _MessageBubble({required this.message});
+  final bool isStreaming;
+  const _MessageBubble({required this.message, this.isStreaming = false});
 
   @override
   Widget build(BuildContext context) {
@@ -193,7 +225,82 @@ class _MessageBubble extends StatelessWidget {
           color: isUser ? AppColors.primary : AppColors.darkSurfaceVariant,
           borderRadius: BorderRadius.circular(18),
         ),
-        child: Text(message.content, style: const TextStyle(color: Colors.white)),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Flexible(child: Text(message.content, style: const TextStyle(color: Colors.white))),
+            // Repère visuel discret pendant la révélation progressive
+            // (§ TEXTE PROGRESSIF) — pas une simple apparition brute du texte.
+            if (isStreaming) ...[
+              const SizedBox(width: 4),
+              const _TypingCursor(),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Petit curseur clignotant, affiché à la fin du texte en cours de révélation
+/// progressive — signale visuellement que la réponse continue d'arriver,
+/// synchronisée à l'audio (voir `VoiceChatNotifier`).
+class _TypingCursor extends StatefulWidget {
+  const _TypingCursor();
+
+  @override
+  State<_TypingCursor> createState() => _TypingCursorState();
+}
+
+class _TypingCursorState extends State<_TypingCursor> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 600),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _controller,
+      child: const Text('▍', style: TextStyle(color: Colors.white)),
+    );
+  }
+}
+
+class _ErrorBanner extends ConsumerWidget {
+  final String? message;
+  const _ErrorBanner({required this.message});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: AppColors.danger.withOpacity(0.15), borderRadius: BorderRadius.circular(14)),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline_rounded, color: AppColors.danger),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              message ?? "Une erreur est survenue.",
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+          // § INTERRUPTION (perte réseau) : permet de retenter la connexion
+          // sans devoir quitter/rouvrir l'écran.
+          TextButton(
+            onPressed: () => ref.read(voiceChatProvider.notifier).retryConnection(),
+            child: const Text('Réessayer'),
+          ),
+        ],
       ),
     );
   }

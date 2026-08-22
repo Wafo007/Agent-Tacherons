@@ -100,17 +100,31 @@ def _no_payload(payload: dict[str, Any]) -> None:
         raise ValueError("Cette action n'accepte aucun paramètre.")
 
 
+def _requires_text(payload: dict[str, Any]) -> None:
+    """
+    Validateur pour les actions transmettant un texte libre à envoyer tel quel
+    (ex. réponse WhatsApp). Borne la longueur pour rester cohérent avec un
+    message WhatsApp réel et éviter tout abus (payload énorme, etc.).
+    """
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Cette action nécessite un champ 'text' non vide.")
+    if len(text) > 2000:
+        raise ValueError("Le texte dépasse la longueur maximale autorisée (2000 caractères).")
+
+
 def build_default_action_registry() -> ActionRegistry:
     """
     Construit le registre des actions applicatives actuellement supportées.
 
-    Limité STRICTEMENT aux écrans réellement existants dans l'app Flutter
-    (voir `w4fo_app/lib/core/router/app_router.dart` : home, tasks, calendar,
-    settings — les 4 routes de la `ShellRoute` principale). Conformément à
-    l'audit préalable, on n'ajoute PAS d'actions correspondant à des écrans
-    qui n'existent pas encore (ex. détail de tâche, écran mémoire) : elles
-    pourront être ajoutées ici, une par une, le jour où ces écrans existeront
-    — sans toucher au reste de la chaîne (agent, WebSocket, etc.).
+    Limité STRICTEMENT aux écrans/intégrations réellement existants côté
+    Flutter/Android (voir `w4fo_app/lib/core/router/app_router.dart` pour les
+    4 routes de navigation, et `w4fo_app/lib/core/whatsapp/` pour
+    l'intégration WhatsApp on-device — voir sa documentation dédiée pour le
+    choix d'architecture et ses limites). Conformément à l'audit préalable,
+    on n'ajoute PAS d'actions correspondant à des capacités qui n'existent
+    pas encore côté client : elles pourront être ajoutées ici, une par une,
+    sans toucher au reste de la chaîne (agent, WebSocket, etc.).
     """
     registry = ActionRegistry()
     registry.register_many(
@@ -134,6 +148,14 @@ def build_default_action_registry() -> ActionRegistry:
                 code="OPEN_SETTINGS",
                 description="Ouvre l'écran des paramètres.",
                 validate=_no_payload,
+            ),
+            ActionSpec(
+                code="WHATSAPP_REPLY",
+                description=(
+                    "Envoie une réponse au message WhatsApp actuellement en attente (celui dont "
+                    "l'expéditeur et le texte ont été fournis dans le contexte de ce tour)."
+                ),
+                validate=_requires_text,
             ),
         ]
     )

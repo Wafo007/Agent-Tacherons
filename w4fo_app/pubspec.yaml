@@ -37,6 +37,18 @@ dependencies:
   # pendant la phase d'écoute passive du mot-clé.
   speech_to_text: ^7.0.0
 
+  # --- WhatsApp (lecture à voix haute des messages reçus) ---
+  # flutter_tts encapsule le moteur de synthèse vocale natif de l'OS (Android
+  # TextToSpeech / iOS AVSpeechSynthesizer) — même famille technique que
+  # `speech_to_text` ci-dessus (wrapper léger autour d'une API système, aucun
+  # binaire natif ni compilation C++ supplémentaire). Utilisé UNIQUEMENT pour
+  # annoncer à voix haute "Message de {expéditeur} : {texte}" à la réception
+  # d'un message WhatsApp — volontairement DÉCOUPLÉ du pipeline vocal
+  # principal (edge-tts côté backend, voir `voice_ws.py`) : une simple
+  # annonce système ne justifie pas d'ouvrir une session WebSocket vers le
+  # backend, ni de consommer un tour de conversation avec l'agent.
+  flutter_tts: ^4.2.0
+
   # --- Utilitaires ---
   intl: ^0.19.0
   equatable: ^2.0.5

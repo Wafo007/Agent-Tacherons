@@ -53,8 +53,7 @@ enum VoiceEngineState {
   idle,
 
   /// Écoute passive en attente d'un mot-clé de réveil ("Wake Word").
-  /// Traitement 100% local (pas de streaming réseau). Non utilisé tant que
-  /// le Wake Word Always-On n'est pas implémenté (voir [WakeWordDetector]).
+  /// Traitement 100% local (pas de streaming réseau).
   listening,
 
   /// Capture active de la commande de l'utilisateur : le micro est ouvert et
@@ -66,12 +65,18 @@ enum VoiceEngineState {
   /// préparation de la réponse (TTS) sont en cours côté backend.
   processing,
 
+  /// L'agent exécute un ou plusieurs outils (tâches, agenda, navigation...).
+  executingAction,
+
   /// Lecture de la réponse audio (TTS) en cours. Une interruption (barge-in)
   /// est possible à tout moment dans cet état.
   speaking,
 
   /// Une erreur est survenue (permission refusée, connexion perdue, etc.).
   error,
+
+  /// Le pipeline vocal est arrêté explicitement (voir `VoiceMachineState.stopped`).
+  stopped,
 }
 
 /// Traduit l'état détaillé actuel de l'UI ([VoiceChatPhase]) vers le
@@ -79,10 +84,7 @@ enum VoiceEngineState {
 ///
 /// Cette extension est purement une projection en lecture : elle ne remplace
 /// pas [VoiceChatPhase], qui garde plus de granularité utile à l'UI
-/// (`transcribing` vs `thinking`, `awaitingConfirmation`...). Elle sert de
-/// point d'ancrage stable pour tout code futur (Wake Word, écoute passive)
-/// qui doit raisonner en termes des 6 macro-états, sans se soucier des
-/// sous-phases internes.
+/// (`transcribing` vs `thinking`, `awaitingConfirmation`...).
 extension VoiceChatPhaseEngineMapping on VoiceChatPhase {
   VoiceEngineState toEngineState() {
     switch (this) {
@@ -91,19 +93,20 @@ extension VoiceChatPhaseEngineMapping on VoiceChatPhase {
       case VoiceChatPhase.listening:
         // Comportement actuel : "listening" désigne la capture active de la
         // commande (micro ouvert + envoi au WebSocket), pas une écoute
-        // passive. Elle correspond donc à recordingCommand au sens de la
-        // nouvelle architecture. Le futur état "écoute passive locale"
-        // utilisera VoiceEngineState.listening directement, sans jamais
-        // passer par VoiceChatPhase.listening.
+        // passive — voir VoiceMachineState.listeningCommand.
         return VoiceEngineState.recordingCommand;
       case VoiceChatPhase.transcribing:
       case VoiceChatPhase.thinking:
       case VoiceChatPhase.awaitingConfirmation:
         return VoiceEngineState.processing;
+      case VoiceChatPhase.executingAction:
+        return VoiceEngineState.executingAction;
       case VoiceChatPhase.speaking:
         return VoiceEngineState.speaking;
       case VoiceChatPhase.error:
         return VoiceEngineState.error;
+      case VoiceChatPhase.stopped:
+        return VoiceEngineState.stopped;
     }
   }
 }

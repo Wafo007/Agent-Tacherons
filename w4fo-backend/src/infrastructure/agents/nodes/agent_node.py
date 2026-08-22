@@ -51,7 +51,7 @@ Une fois toutes les actions nécessaires effectuées, réponds à l'utilisateur 
 manière naturelle, concise et adaptée à une restitution vocale (phrases courtes, pas de listes à
 puces sauf si explicitement demandé). Si un outil a échoué, informe clairement l'utilisateur de
 ce qui n'a pas fonctionné plutôt que d'inventer un résultat.
-{memory_context}
+{whatsapp_context_block}{memory_context}
 """
 
 _FR_WEEKDAYS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
@@ -80,6 +80,25 @@ def _build_memory_context(memories: list[str]) -> str:
         return ""
     bullet_list = "\n".join(f"- {m}" for m in memories)
     return f"\nVoici ce que tu sais déjà sur cet utilisateur :\n{bullet_list}\n"
+
+
+def _build_whatsapp_context_block(whatsapp_context: dict | None) -> str:
+    """
+    Formate le contexte WhatsApp transitoire (§ CONTEXTE, séparation des
+    contextes) en un bloc injecté dans le prompt système SEULEMENT si un
+    message WhatsApp est réellement en attente pour ce tour — sinon chaîne
+    vide, pour ne rien changer au comportement habituel de l'agent.
+    """
+    if not whatsapp_context:
+        return ""
+    sender = whatsapp_context.get("sender") or "un contact"
+    text = whatsapp_context.get("text") or ""
+    return (
+        f"\nMessage WhatsApp en attente de réponse, de la part de {sender} : « {text} »\n"
+        "Si l'utilisateur te demande de répondre à ce message (ex: \"dis-lui que...\", "
+        "\"réponds que...\"), utilise l'outil whatsapp_reply avec une réponse adaptée à ce qu'il "
+        "demande. Ne l'utilise QUE si l'utilisateur le demande explicitement.\n"
+    )
 
 
 def _parse_arguments(raw_arguments: object) -> dict:
@@ -113,8 +132,11 @@ async def agent_node(state: AgentState, llm_provider: LLMProvider, tool_registry
     max_iterations = state.get("max_iterations") or 6
 
     memory_context = _build_memory_context(state.get("relevant_memories", []))
+    whatsapp_context_block = _build_whatsapp_context_block(state.get("whatsapp_context"))
     system_prompt = AGENT_SYSTEM_PROMPT.format(
-        memory_context=memory_context, current_datetime=_format_current_datetime()
+        memory_context=memory_context,
+        whatsapp_context_block=whatsapp_context_block,
+        current_datetime=_format_current_datetime(),
     )
     messages = [{"role": "system", "content": system_prompt}, *state["messages"]]
 

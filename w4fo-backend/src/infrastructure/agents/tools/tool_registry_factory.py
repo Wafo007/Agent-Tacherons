@@ -43,6 +43,11 @@ from src.infrastructure.agents.tools.task_tools import (
     TASK_TOOL_DEFINITIONS,
     execute_task_tool,
 )
+from src.infrastructure.agents.tools.whatsapp_tools import (
+    SENSITIVE_WHATSAPP_TOOLS,
+    WHATSAPP_TOOL_DEFINITIONS,
+    execute_whatsapp_tool,
+)
 
 
 async def _run_task_tool(
@@ -79,6 +84,12 @@ async def _run_app_tool(
     # sans donnée utilisateur), mais l'interface commune `ToolExecutor` l'impose
     # (voir registry.py) pour rester strictement identique quel que soit le domaine.
     return await execute_app_tool(tool_name=tool_name, arguments=arguments, action_registry=action_registry)
+
+
+async def _run_whatsapp_tool(
+    *, tool_name: str, action_registry, arguments: dict[str, Any], user_id: Any
+) -> dict[str, Any]:
+    return await execute_whatsapp_tool(tool_name=tool_name, arguments=arguments, action_registry=action_registry)
 
 
 def build_tool_registry(
@@ -120,9 +131,9 @@ def build_tool_registry(
             )
         )
 
-    # --- Outils applicatifs (Action Gateway) : navigation Flutter ---
+    # --- Outils applicatifs (Action Gateway) : navigation Flutter + réponse WhatsApp ---
     # Un seul registre par tour de conversation suffit : ces actions n'ont pas
-    # d'état, elles ne font que valider un code puis construire un payload.
+    # d'état, elles ne font que valider un payload puis construire un résultat.
     action_registry = build_default_action_registry()
     for definition in APP_TOOL_DEFINITIONS:
         name = definition["function"]["name"]
@@ -133,6 +144,18 @@ def build_tool_registry(
                 parameters=definition["function"]["parameters"],
                 executor=partial(_run_app_tool, tool_name=name, action_registry=action_registry),
                 sensitive=name in SENSITIVE_APP_TOOLS,
+            )
+        )
+
+    for definition in WHATSAPP_TOOL_DEFINITIONS:
+        name = definition["function"]["name"]
+        registry.register(
+            ToolSpec(
+                name=name,
+                description=definition["function"]["description"],
+                parameters=definition["function"]["parameters"],
+                executor=partial(_run_whatsapp_tool, tool_name=name, action_registry=action_registry),
+                sensitive=name in SENSITIVE_WHATSAPP_TOOLS,
             )
         )
 

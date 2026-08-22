@@ -60,6 +60,7 @@ class ProcessConversationMessageUseCase:
         user_id: UUID,
         message: str,
         history: Optional[list[dict[str, Any]]] = None,
+        whatsapp_context: Optional[dict[str, Any]] = None,
     ) -> ProcessMessageResultDTO:
         tool_registry = build_tool_registry(
             self._task_repository,
@@ -84,6 +85,7 @@ class ProcessConversationMessageUseCase:
             "max_iterations": settings.agent_max_iterations,
             "tool_trace": [],
             "client_actions": [],
+            "whatsapp_context": whatsapp_context,
         }
 
         final_state = await graph.ainvoke(initial_state)

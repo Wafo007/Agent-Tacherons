@@ -23,6 +23,7 @@ class MicButton extends StatelessWidget {
       case VoiceChatPhase.listening:
         return AppColors.accent;
       case VoiceChatPhase.thinking:
+      case VoiceChatPhase.executingAction:
         return AppColors.warning;
       case VoiceChatPhase.speaking:
         return AppColors.success;
@@ -39,6 +40,8 @@ class MicButton extends StatelessWidget {
         return Icons.mic_rounded;
       case VoiceChatPhase.thinking:
         return Icons.psychology_outlined;
+      case VoiceChatPhase.executingAction:
+        return Icons.bolt_rounded;
       case VoiceChatPhase.speaking:
         return Icons.volume_up_rounded;
       case VoiceChatPhase.awaitingConfirmation:
@@ -50,7 +53,10 @@ class MicButton extends StatelessWidget {
     }
   }
 
-  bool get _isBusy => phase == VoiceChatPhase.thinking || phase == VoiceChatPhase.speaking;
+  bool get _isBusy =>
+      phase == VoiceChatPhase.thinking ||
+      phase == VoiceChatPhase.executingAction ||
+      phase == VoiceChatPhase.speaking;
 
   @override
   Widget build(BuildContext context) {
