@@ -47,7 +47,7 @@ dependencies:
   # principal (edge-tts côté backend, voir `voice_ws.py`) : une simple
   # annonce système ne justifie pas d'ouvrir une session WebSocket vers le
   # backend, ni de consommer un tour de conversation avec l'agent.
-  flutter_tts: ^4.2.0
+  flutter_tts: ^3.8.0
 
   # --- Utilitaires ---
   intl: ^0.19.0
